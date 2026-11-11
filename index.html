@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Kigali Urban Transit Simulation</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { background: #11111b; color: #cdd6f4; font-family: "Segoe UI", Consolas, sans-serif; margin: 0; padding: 24px; }
+        .wrap { max-width: 1200px; margin: 0 auto; }
+        h2 { margin: 0 0 18px; color: #89dceb; text-align: center; letter-spacing: 3px; font-weight: 600; }
+        .hud { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+        .card { background: #1e1e2e; border: 1px solid #313244; border-radius: 10px; padding: 10px 14px; }
+        .card small { display: block; color: #7f849c; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+        .card span { font-size: 18px; font-weight: 600; }
+        .speedbar { margin-bottom: 18px; }
+        .track { position: relative; height: 14px; background: #1e1e2e; border: 1px solid #313244; border-radius: 7px; overflow: hidden; }
+        .fill { height: 100%; width: 0; background: #a6e3a1; transition: width .25s, background .25s; }
+        .mark { position: absolute; top: 0; bottom: 0; width: 3px; background: #f9e2af; left: 0; transition: left .25s; }
+        .scale { display: flex; justify-content: space-between; font-size: 11px; color: #7f849c; margin-top: 3px; }
+        .viewport { background: #0b0d1e; border: 1px solid #313244; border-radius: 10px; overflow-x: auto; overflow-y: hidden; }
+        .viewport::-webkit-scrollbar { height: 10px; }
+        .viewport::-webkit-scrollbar-thumb { background: #45475a; border-radius: 5px; }
+        canvas { display: block; }
+        .replaybar { display: none; align-items: center; gap: 14px; background: #1e1e2e; border: 1px solid #313244;
+                     border-radius: 10px; padding: 10px 16px; margin-top: 12px; }
+        .replaybar.show { display: flex; }
+        .replaybar button { background: #89b4fa; color: #11111b; border: 0; border-radius: 8px; padding: 7px 16px;
+                            font: 700 13px "Segoe UI", sans-serif; cursor: pointer; min-width: 96px; }
+        .replaybar button:hover { background: #b4befe; }
+        .replaybar input[type="range"] { flex: 1; accent-color: #89b4fa; cursor: pointer; }
+        .replaybar span { font-size: 12px; color: #a6adc8; min-width: 90px; text-align: right; font-variant-numeric: tabular-nums; }
+        .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; justify-content: center; margin: 14px 0; font-size: 12px; color: #a6adc8; }
+        .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; }
+        .logs { background: #1e1e2e; border: 1px solid #313244; border-radius: 10px; padding: 6px 14px;
+                height: 200px; overflow-y: auto; font-family: Consolas, monospace; font-size: 13px; }
+        .logs div { padding: 5px 0; border-bottom: 1px solid #2a2a3c; }
+        .logs div:last-child { border-bottom: 0; }
+        .info { color: #cdd6f4; } .ok { color: #a6e3a1; } .warn { color: #f9e2af; }
+    </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>KIGALI URBAN TRANSIT SIMULATION</h2>
+    <div class="hud">
+        <div class="card"><small>Time</small><span id="time">0s</span></div>
+        <div class="card"><small>Speed</small><span id="speed">0 km/h</span></div>
+        <div class="card"><small>Limit</small><span id="limit">-</span></div>
+        <div class="card"><small>Lane</small><span id="lane">RIGHT</span></div>
+        <div class="card"><small>Next</small><span id="next">-</span></div>
+        <div class="card"><small>Status</small><span id="status">-</span></div>
+    </div>
+    <div class="speedbar"><div class="track"><div class="fill" id="fill"></div><div class="mark" id="mark"></div></div>
+        <div class="scale"><span>0</span><span>30</span><span>60</span><span>90</span><span>120 km/h</span></div></div>
+    <div class="viewport" id="viewport"><canvas id="road"></canvas></div>
+    <div class="replaybar" id="replaybar">
+        <button id="playbtn">&#9654; Play</button>
+        <input type="range" id="scrub" min="0" max="0" value="0">
+        <span id="rtime">0s / 0s</span>
+    </div>
+    <div class="legend">
+        <span>Top lane = LEFT, bottom lane = RIGHT (we drive on the right)</span>
+        <span><i style="background:#a6e3a1"></i>Driving</span>
+        <span><i style="background:#f9e2af"></i>Stopped</span>
+        <span><i style="background:linear-gradient(90deg,#3ddc84,#f9e2af,#f38ba8)"></i>Speed trail</span>
+        <span><i style="background:#f9e2af;border-radius:50%"></i>Stop point</span>
+        <span>After finishing: replay the journey or scroll the road freely</span>
+    </div>
+    <div class="logs" id="logs"></div>
+  </div>
+    <script>
+        const canvas = document.getElementById('road');
+        const ctx = canvas.getContext('2d');
+        const viewport = document.getElementById('viewport');
+        const TP = 84, H = 320, PAD = 110;
+        const ROAD_TOP = 110, ROAD_H = 130, MID = ROAD_TOP + ROAD_H / 2;
+        const LANE_Y = { LEFT: ROAD_TOP + 32, RIGHT: ROAD_TOP + ROAD_H - 32 };
+        const dpr = window.devicePixelRatio || 1;
+        let S = null, carX = 0, carY = LANE_Y.RIGHT, shownLogs = -1, lastRoadLen = -1;
+        let history = [], lastRecordedT = -1, finished = false;
+        const replay = { active: false, playing: false, idx: 0, lastStep: 0 };
+
+        async function poll() {
+            try { const res = await fetch('/state'); S = await res.json(); updateHud(); } catch (e) {}
+            setTimeout(poll, 100);
+        }
+
+        function setText(id, text, color) {
+            const el = document.getElementById(id);
+            el.textContent = text;
+            if (color) el.style.color = color;
+        }
+
+        function showCarHud(c, t, statusText) {
+            setText('time', `${t}s`);
+            setText('speed', `${Math.round(c.speed)} km/h`, c.speed > c.limit ? '#f38ba8' : '#a6e3a1');
+            const fill = document.getElementById('fill');
+            fill.style.width = Math.min(100, c.speed / 120 * 100) + '%';
+            fill.style.background = c.speed > c.limit ? '#f38ba8' : (c.speed >= 70 ? '#fab387' : '#a6e3a1');
+            document.getElementById('mark').style.left = Math.min(100, c.limit / 120 * 100) + '%';
+            setText('limit', `${c.limit} km/h`);
+            setText('lane', c.lane);
+            setText('status', statusText);
+        }
+
+        function resetJourney() {
+            history = []; lastRecordedT = -1; finished = false;
+            replay.active = false; replay.playing = false; replay.idx = 0;
+            document.getElementById('replaybar').classList.remove('show');
+            document.getElementById('playbtn').innerHTML = '&#9654; Play';
+        }
+
+        function finishJourney() {
+            finished = true;
+            const last = history[history.length - 1];
+            if (last && last.pos_m !== S.car.pos_m)
+                history.push({ t: S.time, pos_m: S.car.pos_m, speed: 0, limit: S.car.limit, lane: S.car.lane });
+            replay.active = true;
+            replay.idx = history.length - 1;
+            const scrub = document.getElementById('scrub');
+            scrub.max = history.length - 1;
+            document.getElementById('replaybar').classList.add('show');
+            updateReplayHud();
+        }
+
+        function updateReplayHud() {
+            const h = history[replay.idx];
+            if (!h) return;
+            showCarHud(h, h.t, replay.idx >= history.length - 1 ? 'Finished' : 'Replaying');
+            document.getElementById('scrub').value = replay.idx;
+            document.getElementById('rtime').textContent = `${h.t}s / ${history[history.length - 1].t}s`;
+        }
+
+        const playbtn = document.getElementById('playbtn');
+        playbtn.addEventListener('click', () => {
+            if (!history.length) return;
+            if (!replay.playing && replay.idx >= history.length - 1) replay.idx = 0;
+            replay.playing = !replay.playing;
+            replay.lastStep = 0;
+            playbtn.innerHTML = replay.playing ? '&#10073;&#10073; Pause' : '&#9654; Play';
+            updateReplayHud();
+        });
+        document.getElementById('scrub').addEventListener('input', e => {
+            replay.idx = +e.target.value;
+            replay.playing = false;
+            playbtn.innerHTML = '&#9654; Play';
+            updateReplayHud();
+            // Centre the car once, then the user can scroll freely back and forth
+            const h = history[replay.idx];
+            if (h) viewport.scrollLeft = Math.max(0, PAD + h.pos_m / 100 * TP - viewport.clientWidth * 0.5);
+        });
+
+        function updateHud() {
+            if (!S.car || S.car.speed === undefined) return;
+            // Record the journey second by second so it can be replayed later
+            if (S.time < lastRecordedT) resetJourney();
+            if (S.time !== lastRecordedT) {
+                lastRecordedT = S.time;
+                history.push({ t: S.time, pos_m: S.car.pos_m, speed: S.car.speed, limit: S.car.limit, lane: S.car.lane });
+            }
+            if (S.status === 'Finished' && !finished) finishJourney();
+            if (!replay.active) showCarHud(S.car, S.time, S.status);
+            setText('next', S.next);
+            // Rebuild the log only when something new arrived
+            const key = S.logs.length + '|' + (S.logs.length ? S.logs[S.logs.length - 1].msg : '');
+            if (key !== shownLogs) {
+                shownLogs = key;
+                const box = document.getElementById('logs');
+                box.replaceChildren(...S.logs.slice().reverse().map(e => {
+                    const row = document.createElement('div');
+                    row.className = e.level;
+                    row.textContent = `[${e.t}s] ${e.msg}`;
+                    return row;
+                }));
+            }
+        }
+
+        function resize(n) {
+            if (n === lastRoadLen) return;
+            lastRoadLen = n;
+            const w = n * TP + PAD * 2;
+            canvas.width = w * dpr; canvas.height = H * dpr;
+            canvas.style.width = w + 'px'; canvas.style.height = H + 'px';
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        function roundRect(x, y, w, h, r, fill) {
+            ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fillStyle = fill; ctx.fill();
+        }
+
+        function roundRectStroke(x, y, w, h, r, color, lw) {
+            ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+        }
+
+        function text(str, x, y, size, color, weight = 'bold') {
+            ctx.fillStyle = color; ctx.font = `${weight} ${size}px "Segoe UI", sans-serif`;
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(str, x, y);
+        }
+
+        function drawSign(i, sign, cx) {
+            const y = 50;
+            ctx.save();
+            if (/^[0-9]+$/.test(sign)) {
+                // Speed limit: bright white disc, bold red ring, soft red glow
+                ctx.shadowColor = '#f38ba8'; ctx.shadowBlur = 14;
+                ctx.beginPath(); ctx.arc(cx, y, 25, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff'; ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.lineWidth = 6; ctx.strokeStyle = '#e64553'; ctx.stroke();
+                ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(17,17,27,0.12)';
+                ctx.beginPath(); ctx.arc(cx, y, 18.5, 0, Math.PI * 2); ctx.stroke();
+                text(sign, cx, y + 1, 19, '#11111b');
+            } else if (sign === 'zebra') {
+                // Pedestrian crossing: glowing blue board, white triangle with stripes
+                ctx.shadowColor = '#89b4fa'; ctx.shadowBlur = 14;
+                roundRect(cx - 25, y - 25, 50, 50, 9, '#2f6fdb');
+                ctx.shadowBlur = 0;
+                roundRectStroke(cx - 25, y - 25, 50, 50, 9, '#ffffff', 3);
+                ctx.beginPath();
+                ctx.moveTo(cx, y - 13); ctx.lineTo(cx + 13, y + 12); ctx.lineTo(cx - 13, y + 12);
+                ctx.closePath(); ctx.fillStyle = '#ffffff'; ctx.fill();
+                ctx.save(); ctx.clip();
+                ctx.strokeStyle = '#2f6fdb'; ctx.lineWidth = 3.5;
+                for (let k = -2; k <= 2; k++) {
+                    ctx.beginPath();
+                    ctx.moveTo(cx - 18 + k * 8, y + 16); ctx.lineTo(cx + 6 + k * 8, y - 16);
+                    ctx.stroke();
+                }
+                ctx.restore();
+            } else if (sign === 'bus') {
+                // Bus stop: glowing amber board with a simple bus pictogram
+                ctx.shadowColor = '#f9c74f'; ctx.shadowBlur = 14;
+                roundRect(cx - 25, y - 25, 50, 50, 9, '#f9c74f');
+                ctx.shadowBlur = 0;
+                roundRectStroke(cx - 25, y - 25, 50, 50, 9, '#ffffff', 3);
+                // Minimal bus: dark body, one window band, two wheels
+                roundRect(cx - 14, y - 9, 28, 15, 4, '#11111b');
+                roundRect(cx - 11, y - 6, 22, 5, 2, '#f9c74f');
+                ctx.fillStyle = '#11111b';
+                ctx.beginPath(); ctx.arc(cx - 7, y + 7, 3, 0, Math.PI * 2); ctx.arc(cx + 7, y + 7, 3, 0, Math.PI * 2); ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        function drawScenery(roadW) {
+            const W = roadW + PAD * 2, base = ROAD_TOP - 8;
+            const sky = ctx.createLinearGradient(0, 0, 0, ROAD_TOP);
+            sky.addColorStop(0, '#0b0d1e'); sky.addColorStop(1, '#1d2142');
+            ctx.fillStyle = sky; ctx.fillRect(0, 0, W, ROAD_TOP);
+
+            // Stars and moon
+            ctx.fillStyle = 'rgba(205,214,244,0.7)';
+            for (let i = 0; i < W / 22; i++) {
+                const sx = (i * 137) % W, sy = 6 + (i * 53) % 55;
+                ctx.fillRect(sx, sy, 1.5, 1.5);
+            }
+            ctx.beginPath(); ctx.arc(150, 34, 13, 0, Math.PI * 2); ctx.fillStyle = '#e8e4c9'; ctx.fill();
+            ctx.beginPath(); ctx.arc(155, 31, 12, 0, Math.PI * 2); ctx.fillStyle = '#0f1228'; ctx.fill();
+
+            // Distant hills
+            for (const [col, amp, off, step] of [['#141a30', 24, 0, 260], ['#10172a', 16, 90, 190]]) {
+                ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, base);
+                for (let x = 0; x <= W; x += 10) ctx.lineTo(x, base - 10 - amp * (0.6 + 0.4 * Math.sin((x + off) / step * Math.PI)));
+                ctx.lineTo(W, base); ctx.closePath(); ctx.fill();
+            }
+
+            // Generic skyline with lit windows
+            for (let x = 40, k = 0; x < W; x += 46 + (k % 3) * 8, k++) {
+                const bw = 22 + (k * 7) % 14, bh = 16 + (k * 11) % 26;
+                ctx.fillStyle = '#171b33'; ctx.fillRect(x, base - bh, bw, bh);
+                ctx.fillStyle = 'rgba(249,226,175,0.55)';
+                for (let wy = base - bh + 4; wy < base - 4; wy += 7)
+                    for (let wx = x + 4; wx < x + bw - 3; wx += 7) if ((wx + wy + k) % 3) ctx.fillRect(wx, wy, 2, 3);
+            }
+
+            // Kigali landmarks (simple silhouettes with lit details)
+            const tower = PAD + Math.min(300, roadW * 0.25);
+            drawCityTower(tower, base);
+            drawBKArena(PAD + roadW * 0.55, base);
+            drawConventionCentre(PAD + roadW - 20, base);
+
+            // Grass verges and road-side trees
+            ctx.fillStyle = '#16251f'; ctx.fillRect(0, base, W, ROAD_TOP - base);
+            ctx.fillRect(0, ROAD_TOP + ROAD_H, W, H - ROAD_TOP - ROAD_H);
+            for (let x = 70; x < W; x += 130) {
+                ctx.fillStyle = '#2b2a25'; ctx.fillRect(x - 2, base - 6, 4, 8);
+                ctx.fillStyle = '#1d3a2c'; ctx.beginPath(); ctx.arc(x, base - 12, 8, 0, Math.PI * 2); ctx.fill();
+            }
+
+            // Street lamps with a soft glow
+            for (let x = PAD + TP / 2; x < PAD + roadW; x += TP * 3) {
+                ctx.fillStyle = '#45475a'; ctx.fillRect(x - 1, ROAD_TOP - 26, 2, 26);
+                const g = ctx.createRadialGradient(x, ROAD_TOP - 28, 1, x, ROAD_TOP - 28, 26);
+                g.addColorStop(0, 'rgba(249,226,175,0.55)'); g.addColorStop(1, 'rgba(249,226,175,0)');
+                ctx.fillStyle = g; ctx.fillRect(x - 26, ROAD_TOP - 54, 52, 52);
+                ctx.fillStyle = '#f9e2af'; ctx.beginPath(); ctx.arc(x, ROAD_TOP - 28, 2.5, 0, Math.PI * 2); ctx.fill();
+            }
+        }
+
+        // Kigali City Tower: tall slim block with lit window rows
+        function drawCityTower(x, base) {
+            ctx.fillStyle = '#20264a'; ctx.fillRect(x - 11, base - 62, 22, 62);
+            ctx.fillStyle = '#2a3160'; ctx.fillRect(x - 5, base - 70, 10, 8);
+            ctx.fillStyle = 'rgba(249,226,175,0.8)';
+            for (let wy = base - 56; wy < base - 4; wy += 6) { ctx.fillRect(x - 7, wy, 3, 3); ctx.fillRect(x + 1, wy, 3, 3); }
+        }
+
+        // BK Arena: low round stadium with a glowing rim
+        function drawBKArena(x, base) {
+            ctx.fillStyle = '#20264a';
+            ctx.beginPath(); ctx.ellipse(x, base, 38, 20, 0, Math.PI, 0); ctx.fill();
+            ctx.strokeStyle = '#89b4fa'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.ellipse(x, base, 38, 20, 0, Math.PI, 0); ctx.stroke();
+            ctx.fillStyle = 'rgba(137,180,250,0.5)';
+            for (let k = -3; k <= 3; k++) ctx.fillRect(x + k * 9 - 1, base - 12, 2, 12);
+        }
+
+        // Kigali Convention Centre: the glowing dome
+        function drawConventionCentre(x, base) {
+            ctx.fillStyle = '#232a55';
+            ctx.beginPath(); ctx.arc(x, base, 36, Math.PI, 0); ctx.fill();
+            ctx.fillStyle = '#2d356b'; ctx.fillRect(x - 46, base - 8, 92, 8);
+            ctx.strokeStyle = 'rgba(166,227,161,0.75)'; ctx.lineWidth = 1.5;
+            for (let r = 12; r <= 36; r += 12) { ctx.beginPath(); ctx.arc(x, base, r, Math.PI, 0); ctx.stroke(); }
+            ctx.beginPath(); ctx.moveTo(x, base); ctx.lineTo(x, base - 36); ctx.stroke();
+        }
+
+        // Trail colour: green at low speed -> red at high speed
+        function speedHue(speed) { return Math.max(0, 130 - speed * 1.1); }
+
+        // The recorded journey drawn as a glowing trail on the lanes
+        function drawTrajectory() {
+            if (history.length < 2) return;
+            const upto = replay.active ? replay.idx : history.length - 1;
+            ctx.save();
+            ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            for (let i = 1; i < history.length; i++) {
+                const a = history[i - 1], b = history[i];
+                const x1 = PAD + a.pos_m / 100 * TP, y1 = LANE_Y[a.lane] ?? LANE_Y.RIGHT;
+                const x2 = PAD + b.pos_m / 100 * TP, y2 = LANE_Y[b.lane] ?? LANE_Y.RIGHT;
+                const past = i <= upto;
+                ctx.shadowBlur = past ? 6 : 0;
+                ctx.shadowColor = `hsl(${speedHue(b.speed)}, 95%, 62%)`;
+                ctx.strokeStyle = `hsla(${speedHue(b.speed)}, 95%, 62%, ${past ? 0.9 : 0.18})`;
+                ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+            }
+            ctx.shadowBlur = 0;
+            // Amber dots where the car stood still
+            for (let i = 0; i <= upto; i++) {
+                const h = history[i];
+                if (h.speed === 0) {
+                    const x = PAD + h.pos_m / 100 * TP, y = LANE_Y[h.lane] ?? LANE_Y.RIGHT;
+                    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
+                    ctx.fillStyle = '#f9e2af'; ctx.fill();
+                    ctx.lineWidth = 1.5; ctx.strokeStyle = '#11111b'; ctx.stroke();
+                }
+            }
+            ctx.restore();
+        }
+
+        // Clean minimal car: one smooth silhouette, window band, simple wheels
+        function drawCar(x, y, color, name) {
+            ctx.save();
+            // Soft headlight beam
+            const beam = ctx.createLinearGradient(x, y, x + 62, y);
+            beam.addColorStop(0, 'rgba(249,226,175,0.28)');
+            beam.addColorStop(1, 'rgba(249,226,175,0)');
+            ctx.fillStyle = beam;
+            ctx.beginPath();
+            ctx.moveTo(x - 2, y - 6); ctx.lineTo(x + 58, y - 16);
+            ctx.lineTo(x + 58, y + 8); ctx.lineTo(x - 2, y + 4);
+            ctx.closePath(); ctx.fill();
+
+            // Single smooth body silhouette with a soft glow
+            ctx.shadowColor = color; ctx.shadowBlur = 14;
+            ctx.beginPath();
+            ctx.moveTo(x - 46, y + 8);
+            ctx.lineTo(x - 46, y - 6);
+            ctx.quadraticCurveTo(x - 46, y - 12, x - 40, y - 12);
+            ctx.lineTo(x - 33, y - 22);
+            ctx.quadraticCurveTo(x - 31, y - 24, x - 27, y - 24);
+            ctx.lineTo(x - 17, y - 24);
+            ctx.quadraticCurveTo(x - 12, y - 24, x - 9, y - 20);
+            ctx.lineTo(x - 3, y - 9);
+            ctx.quadraticCurveTo(x - 1, y - 7, x - 1, y - 3);
+            ctx.lineTo(x - 1, y + 8);
+            ctx.quadraticCurveTo(x - 1, y + 12, x - 5, y + 12);
+            ctx.lineTo(x - 42, y + 12);
+            ctx.quadraticCurveTo(x - 46, y + 12, x - 46, y + 8);
+            ctx.closePath();
+            ctx.fillStyle = color; ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Subtle top-down sheen over the same silhouette
+            const sheen = ctx.createLinearGradient(0, y - 24, 0, y + 12);
+            sheen.addColorStop(0, 'rgba(255,255,255,0.35)');
+            sheen.addColorStop(0.55, 'rgba(255,255,255,0.04)');
+            sheen.addColorStop(1, 'rgba(0,0,0,0.18)');
+            ctx.fillStyle = sheen; ctx.fill();
+
+            // One dark window band with a centre pillar
+            ctx.beginPath();
+            ctx.moveTo(x - 31, y - 13);
+            ctx.lineTo(x - 26.5, y - 21);
+            ctx.lineTo(x - 18, y - 21);
+            ctx.lineTo(x - 12.5, y - 13);
+            ctx.closePath();
+            ctx.fillStyle = '#161a2c'; ctx.fill();
+            ctx.strokeStyle = color; ctx.lineWidth = 1.6;
+            ctx.beginPath(); ctx.moveTo(x - 21.5, y - 21); ctx.lineTo(x - 21.5, y - 13); ctx.stroke();
+
+            // Simple wheels
+            for (const wx of [x - 35, x - 12]) {
+                ctx.beginPath(); ctx.arc(wx, y + 12, 6, 0, Math.PI * 2);
+                ctx.fillStyle = '#0b0b12'; ctx.fill();
+                ctx.lineWidth = 1.8; ctx.strokeStyle = '#6c7086'; ctx.stroke();
+            }
+
+            // Headlight and taillight
+            ctx.beginPath(); ctx.arc(x - 3.5, y - 2, 2.2, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff9c2'; ctx.fill();
+            roundRect(x - 47, y - 5, 3, 5, 1, '#e64553');
+
+            // Name pill
+            const label = (name || 'Driver').slice(0, 14);
+            ctx.font = 'bold 12px "Segoe UI", sans-serif';
+            const pw = ctx.measureText(label).width + 16;
+            ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 6;
+            roundRect(x - 22 - pw / 2, y - 46, pw, 20, 10, '#cdd6f4');
+            ctx.shadowBlur = 0;
+            text(label, x - 22, y - 35, 12, '#11111b');
+            ctx.restore();
+        }
+
+        function draw() {
+            const n = S.road.length;
+            resize(n);
+            const roadW = n * TP;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            drawScenery(roadW);
+
+            // Road surface, edges, centre line
+            ctx.fillStyle = '#313244'; ctx.fillRect(PAD, ROAD_TOP, roadW, ROAD_H);
+            ctx.fillStyle = '#585b70';
+            ctx.fillRect(PAD, ROAD_TOP - 3, roadW, 3); ctx.fillRect(PAD, ROAD_TOP + ROAD_H, roadW, 3);
+            ctx.strokeStyle = '#cdd6f4'; ctx.lineWidth = 2; ctx.setLineDash([16, 14]);
+            ctx.beginPath(); ctx.moveTo(PAD, MID); ctx.lineTo(PAD + roadW, MID); ctx.stroke();
+            ctx.setLineDash([]);
+
+            for (let i = 0; i < n; i++) {
+                const x = PAD + i * TP, cx = x + TP / 2, sign = S.road[i];
+
+                // Segment separator and number below the road
+                if (i > 0) { ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(x, ROAD_TOP, 1, ROAD_H); }
+                text(i, cx, ROAD_TOP + ROAD_H + 20, 12, '#8c93b3', 'normal');
+
+                if (sign === 'zebra') {
+                    ctx.fillStyle = '#e6e9f5';
+                    for (let k = 0; k < 7; k++) ctx.fillRect(x + 14 + k * 8, ROAD_TOP + 4, 4, ROAD_H - 8);
+                } else if (sign === 'bus') {
+                    const l = (i > 0 && S.road[i - 1] === 'bus') ? 0 : 8;
+                    const r = (i < n - 1 && S.road[i + 1] === 'bus') ? 0 : 8;
+                    roundRect(x + l, LANE_Y.RIGHT - 20, TP - l - r, 40, 6, 'rgba(249,199,79,0.16)');
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(249,199,79,0.7)'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
+                    ctx.beginPath(); ctx.roundRect(x + l + 1, LANE_Y.RIGHT - 19, TP - l - r - 2, 38, 5); ctx.stroke();
+                    ctx.restore();
+                    text('BUS', cx, LANE_Y.RIGHT + 1, 13, '#f9c74f');
+                }
+                if (sign !== '' && sign != null) {
+                    // Sign sits on a short metallic post above the segment it applies to
+                    const pg = ctx.createLinearGradient(cx - 2, 0, cx + 2, 0);
+                    pg.addColorStop(0, '#45475a'); pg.addColorStop(0.5, '#8c93b3'); pg.addColorStop(1, '#45475a');
+                    ctx.fillStyle = pg; ctx.fillRect(cx - 2, 76, 4, ROAD_TOP - 76);
+                    drawSign(i, String(sign), cx);
+                }
+            }
+
+            // Start line
+            ctx.fillStyle = '#89dceb'; ctx.fillRect(PAD - 3, ROAD_TOP, 3, ROAD_H);
+
+            // Finish line
+            const fx = PAD + roadW;
+            for (let r = 0; r < 13; r++) for (let c = 0; c < 2; c++) {
+                ctx.fillStyle = (r + c) % 2 ? '#fff' : '#11111b';
+                ctx.fillRect(fx + c * 10, ROAD_TOP + r * 10, 10, 10);
+            }
+            const ly = ROAD_TOP + ROAD_H + 40;
+            roundRect(fx - 100, ly, 200, 30, 15, '#a6e3a1');
+            text('FINISH: Convention Center', fx, ly + 15, 12, '#11111b');
+            roundRect(PAD - 100, ly, 200, 30, 15, '#89dceb');
+            text('START: ALU Rwanda', PAD, ly + 15, 12, '#11111b');
+
+            // Journey trail (live while driving, full route once finished)
+            drawTrajectory();
+
+            // Car - live position, or the replay snapshot when scrubbing
+            const view = replay.active && history.length ? history[replay.idx]
+                       : (S.car && S.car.speed !== undefined ? S.car : null);
+            if (view) {
+                const tx = PAD + view.pos_m / 100 * TP, ty = LANE_Y[view.lane] ?? LANE_Y.RIGHT;
+                carX += (tx - carX) * 0.4;
+                carY += (ty - carY) * 0.15;
+                const color = view.speed === 0 ? '#f9e2af' : (view.speed > view.limit ? '#f38ba8' : '#a6e3a1');
+                const streaks = Math.round(view.speed / 15);
+                ctx.save();
+                ctx.globalAlpha = 0.5; ctx.strokeStyle = color; ctx.lineWidth = 2;
+                for (let k = 0; k < streaks; k++) {
+                    const sy = carY - 12 + (k % 4) * 8, len = 12 + view.speed * 0.6;
+                    ctx.beginPath(); ctx.moveTo(carX - 52 - (k % 2) * 10, sy); ctx.lineTo(carX - 52 - len - (k % 2) * 10, sy); ctx.stroke();
+                }
+                ctx.restore();
+                drawCar(carX, carY, color, S.driver);
+                // Keep the car in view while driving or while the replay is playing;
+                // when finished/paused the user can scroll back and forth freely
+                if (!finished || replay.playing) {
+                    const target = carX - viewport.clientWidth * 0.6;
+                    viewport.scrollLeft += (target - viewport.scrollLeft) * 0.15;
+                }
+            }
+        }
+
+        function frame() {
+            if (replay.playing) {
+                const now = performance.now();
+                if (now - replay.lastStep > 300) {
+                    replay.lastStep = now;
+                    if (replay.idx < history.length - 1) { replay.idx++; updateReplayHud(); }
+                    else { replay.playing = false; playbtn.innerHTML = '&#9654; Play'; }
+                }
+            }
+            if (S && S.road.length) draw();
+            requestAnimationFrame(frame);
+        }
+        poll(); frame();
+    </script>
+</body>
+</html>
