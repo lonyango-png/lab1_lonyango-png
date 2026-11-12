@@ -129,19 +129,43 @@ def count_signs(road_list):
 # TODO 7: Keep asking until the user types a whole number from low to high.
 # Use try/except for text that is not a number. Return the number as an int.
 def ask_for_number(question, low, high):
-    pass
+    # Keep asking until we get a valid answer.
+    while True:
+        answer = input(question).strip() # strip() removes accidental spaces
+        # try/except catches text that is not a whole number such as "abc", "2.5", or "".
+        try:
+            number = int(answer)
+        except ValueError:
+            print(f" '{answer}' is not a whole number. Example: type {low} or {high}.")
+            continue # take you back to the top of the loop and ask again
+
+        # if it's a number, it must e within a range.
+        if number < low or number > high:
+            print(f" {number} is out of range. Enter a whole number from {low} to {high}.")
+            continue
+
+        return number # only reached when the input is valid.
 
 
 # TODO 8: Insert sign at position. Return False if position is not from 0 to len(road_list).
 # Otherwise insert and return True.
 def insert_sign(road_list, sign, position):
-    pass
+    # Valid positions are 0 up to len(road_list); the end is allowed
+    if position < 0 or position > len(road_list):
+        return False
+
+    road_list.insert(position, sign)
+    return True
 
 
 # TODO 9: Replace the sign at index with a new sign. Return False if index is not
 # from 0 to len(road_list) - 1. Otherwise replace it and return True.
 def replace_sign(road_list, sign, index):
-    pass
+    # Valid indexes are 0 up to len(road_list) - 1; there is nothing to replace at the end.
+    if index < 0 or index > len(road_list) - 1:
+        return False
+    road_list[index] = sign
+    return True 
 
 
 # TODO 10: Summarise the journey. Use a loop to count the signs we pass
@@ -149,7 +173,16 @@ def replace_sign(road_list, sign, index):
 # (signs_passed, length_m, START_NAME, END_NAME)
 # length_m is the number of segments times SEGMENT_M.
 def get_journey_summary(road_list):
-    pass
+    signs_passed = 0
+    #Every segment that is not plain "road" counts as a sign we pass.
+    for sign in road_list:
+        if get_sign_type(sign) != "road":
+            signs_passed = signs_passed + 1
+
+    length_m = len(road_list) * SEGMENT_M # number of segmets times 100m
+
+    # order that print_report() expects: (signs_passed, length_m, START_NAME, END_NAME)
+    return (signs_passed, length_m, START_NAME, END_NAME)
 
 
 if __name__ == "__main__":
